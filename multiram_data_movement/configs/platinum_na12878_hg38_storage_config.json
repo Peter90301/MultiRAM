@@ -1,0 +1,97 @@
+{
+  "experiment_name": "platinum_na12878_hg38_storage_bound_genomics",
+  "results_dir": "/home/tsl012/multiomic/multiram_data_movement/results_platinum_na12878_hg38",
+  "plots_dir": "/home/tsl012/multiomic/multiram_data_movement/results_platinum_na12878_hg38/plots",
+  "threads": 16,
+  "platform": {
+    "cpu_name": "AMD Ryzen Threadripper PRO 9985WX 64-Cores",
+    "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+    "projected_gpu_name": "NVIDIA H100",
+    "cpu_power_w": 350.0,
+    "gpu_power_w": 300.0,
+    "pim_power_w": 45.0
+  },
+  "tools": {
+    "minimap2": "/home/tsl012/multiomic/external/minimap2/minimap2",
+    "minigraph": "minigraph",
+    "falcon": "falcon",
+    "spectrast": "spectrast",
+    "ann_solo": "ann-solo",
+    "python": "python3",
+    "nsys": "nsys",
+    "ncu": "ncu",
+    "nvidia_smi": "nvidia-smi",
+    "perf": "perf"
+  },
+  "commands": {
+    "proteomics_clustering_cpu": "",
+    "proteomics_clustering_gpu": "",
+    "oms_cpu_extra_args": "",
+    "oms_gpu_extra_args": ""
+  },
+  "workloads": {
+    "genomics": {
+      "dataset_name": "Platinum_Genomes_NA12878_PRJEB3246_36FASTQ_vs_hg38",
+      "reference": "/mnt/hdd/tsunghan/raw-ms-dataset/references/hg38/hg38.mmi",
+      "pair_manifest": "/mnt/hdd/tsunghan/raw-ms-dataset/genomic_large_Dset/PRJEB3246_NA12878_paired_fastqs.tsv",
+      "reads_dir": "/mnt/hdd/tsunghan/raw-ms-dataset/genomic_large_Dset",
+      "output_dir": "/home/tsl012/multiomic/multiram_data_movement/results_platinum_na12878_hg38/workload_outputs/minimap2_paf",
+      "pair_timing_tsv": "/home/tsl012/multiomic/multiram_data_movement/results_platinum_na12878_hg38/raw_logs/genomics_alignment/cpu/storage_bound/full/run_0/pair_timing.tsv",
+      "tool": "minimap2",
+      "minimap2_preset": "sr",
+      "output_mode": "discard",
+      "max_pairs": 0,
+      "extra_args": [
+        "--secondary=no"
+      ]
+    },
+    "proteomics_clustering": {
+      "dataset_name": "not_applicable_to_platinum_genomes",
+      "query": "",
+      "output": "/home/tsl012/multiomic/multiram_data_movement/results_platinum_na12878_hg38/workload_outputs/proteomics_clusters.tsv"
+    },
+    "oms": {
+      "dataset_name": "not_applicable_to_platinum_genomes",
+      "library": "",
+      "query": "",
+      "output": "/home/tsl012/multiomic/multiram_data_movement/results_platinum_na12878_hg38/workload_outputs/oms_output"
+    }
+  },
+  "multiram_movement_bytes": {
+    "genomics_alignment": {
+      "FeNAND_compressed_FASTQ_stream": 614082898328,
+      "FeNAND_reference_stream": 0,
+      "query_dispatch": 0,
+      "FeRAM_to_3D_DRAM_feature_forwarding": 0,
+      "local_3D_DRAM_MoE_token_movement": 0
+    },
+    "proteomics_clustering": {
+      "FeNAND_reference_stream": 0,
+      "query_dispatch": 0,
+      "FeRAM_to_3D_DRAM_feature_forwarding": 0,
+      "local_3D_DRAM_MoE_token_movement": 0
+    },
+    "oms": {
+      "FeNAND_reference_stream": 0,
+      "query_dispatch": 0,
+      "FeRAM_to_3D_DRAM_feature_forwarding": 0,
+      "local_3D_DRAM_MoE_token_movement": 0
+    }
+  },
+  "profiling": {
+    "perf_events": [
+      "cycles",
+      "instructions",
+      "cache-references",
+      "cache-misses",
+      "LLC-loads",
+      "LLC-load-misses",
+      "LLC-stores",
+      "major-faults",
+      "minor-faults"
+    ],
+    "power_sample_interval_s": 1,
+    "drop_caches_requires_root": true,
+    "storage_block_size_bytes": 1024
+  }
+}

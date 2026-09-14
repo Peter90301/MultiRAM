@@ -1,0 +1,10 @@
+joblib
+Cython
+numba
+numpy
+pandas
+pyteomics
+scikit-learn
+spectrum-utils
+torch
+tqdm

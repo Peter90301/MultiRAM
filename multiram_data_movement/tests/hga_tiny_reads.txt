@@ -1,0 +1,4 @@
+read_0
+ACGT
+read_1
+CGTA

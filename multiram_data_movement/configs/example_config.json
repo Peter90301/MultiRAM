@@ -1,0 +1,89 @@
+{
+  "experiment_name": "multiram_data_movement_example",
+  "results_dir": "results",
+  "plots_dir": "plots",
+  "threads": 16,
+  "platform": {
+    "cpu_name": "Intel Xeon 6 GNR 6515P",
+    "gpu_name": "NVIDIA A100 80GB",
+    "projected_gpu_name": "NVIDIA H100",
+    "cpu_power_w": 350.0,
+    "gpu_power_w": 300.0,
+    "pim_power_w": 45.0
+  },
+  "tools": {
+    "minimap2": "minimap2",
+    "minigraph": "minigraph",
+    "falcon": "falcon",
+    "spectrast": "spectrast",
+    "ann_solo": "ann-solo",
+    "python": "python3",
+    "nsys": "nsys",
+    "ncu": "ncu",
+    "nvidia_smi": "nvidia-smi",
+    "perf": "perf"
+  },
+  "commands": {
+    "proteomics_clustering_cpu": "",
+    "proteomics_clustering_gpu": "",
+    "oms_cpu_extra_args": "",
+    "oms_gpu_extra_args": ""
+  },
+  "workloads": {
+    "genomics": {
+      "dataset_name": "replace_with_dataset_name",
+      "reference": "/path/to/reference.fa_or_index",
+      "reads": "/path/to/reads.fastq",
+      "output": "results/workload_outputs/genomics_alignment.sam",
+      "tool": "minimap2",
+      "minimap2_preset": "map-ont"
+    },
+    "proteomics_clustering": {
+      "dataset_name": "replace_with_dataset_name",
+      "query": "/path/to/query.mgf",
+      "output": "results/workload_outputs/proteomics_clusters.tsv"
+    },
+    "oms": {
+      "dataset_name": "replace_with_dataset_name",
+      "library": "/path/to/spectral_library",
+      "query": "/path/to/query.mgf",
+      "output": "results/workload_outputs/oms_output"
+    }
+  },
+  "multiram_movement_bytes": {
+    "genomics_alignment": {
+      "FeNAND_reference_stream": 0,
+      "query_dispatch": 0,
+      "FeRAM_to_3D_DRAM_feature_forwarding": 0,
+      "local_3D_DRAM_MoE_token_movement": 0
+    },
+    "proteomics_clustering": {
+      "FeNAND_reference_stream": 0,
+      "query_dispatch": 0,
+      "FeRAM_to_3D_DRAM_feature_forwarding": 0,
+      "local_3D_DRAM_MoE_token_movement": 0
+    },
+    "oms": {
+      "FeNAND_reference_stream": 0,
+      "query_dispatch": 0,
+      "FeRAM_to_3D_DRAM_feature_forwarding": 0,
+      "local_3D_DRAM_MoE_token_movement": 0
+    }
+  },
+  "profiling": {
+    "perf_events": [
+      "cycles",
+      "instructions",
+      "cache-references",
+      "cache-misses",
+      "LLC-loads",
+      "LLC-load-misses",
+      "LLC-stores",
+      "major-faults",
+      "minor-faults"
+    ],
+    "power_sample_interval_s": 1,
+    "drop_caches_requires_root": true,
+    "storage_block_size_bytes": 1024
+  }
+}
