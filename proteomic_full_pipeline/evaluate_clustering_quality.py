@@ -17,7 +17,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from scipy.optimize import linear_sum_assignment
-from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
+from sklearn.metrics import (
+    adjusted_rand_score,
+    completeness_score,
+    normalized_mutual_info_score,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -247,7 +251,9 @@ def run_multiram_functional_clustering(
         else:
             distances = _hamming_distance_matrix_numpy(encoded[indices])
             local_clusters = nn_chain_hac_from_distance(
-                distances, threshold_ratio=threshold_ratio
+                distances,
+                threshold_ratio=threshold_ratio,
+                hv_dimension=encoded.shape[1],
             )
         for cluster in local_clusters:
             label = f"pim:{next_cluster}"
@@ -309,6 +315,22 @@ def quality_metrics(truth: list[str], predicted: list[str]) -> dict[str, Any]:
     pred_count = len(pred_sets)
     count_agreement = min(true_count, pred_count) / max(true_count, pred_count)
 
+    clustered_mask = [
+        str(label) != "-1" and ":noise:" not in str(label)
+        for label in predicted
+    ]
+    clustered_count = sum(clustered_mask)
+    clustered_groups: dict[str, list[str]] = defaultdict(list)
+    for true_label, pred_label, is_clustered in zip(
+        truth, predicted, clustered_mask
+    ):
+        if is_clustered:
+            clustered_groups[pred_label].append(true_label)
+    incorrect_count = sum(
+        len(labels) - Counter(labels).most_common(1)[0][1]
+        for labels in clustered_groups.values()
+    )
+
     return {
         "spectra": len(truth),
         "adjusted_rand_index": float(adjusted_rand_score(truth, predicted)),
@@ -327,11 +349,20 @@ def quality_metrics(truth: list[str], predicted: list[str]) -> dict[str, Any]:
         "cluster_count_agreement": count_agreement,
         "exact_correct_clusters": exact_truth_clusters,
         "correct_cluster_ratio": exact_truth_clusters / true_count,
+        "num_clustered": clustered_count,
+        "num_noise": len(truth) - clustered_count,
+        "clustered_ratio": clustered_count / len(truth),
+        "incorrect_clustered_spectra": incorrect_count,
+        "incorrect_clustering_ratio": (
+            incorrect_count / clustered_count if clustered_count else 0.0
+        ),
+        "completeness": float(completeness_score(truth, predicted)),
     }
 
 
 def write_report(path: Path, summary: dict[str, Any]) -> None:
     rows = []
+    hyperspec_rows = []
     for platform in ("falcon_cpu", "rapids_gpu", "multiram_pim_functional"):
         result = summary["quality"][platform]
         rows.append(
@@ -340,6 +371,13 @@ def write_report(path: Path, summary: dict[str, Any]) -> None:
             "{cluster_assignment_agreement:.2%} | {pairwise_precision:.2%} | "
             "{pairwise_recall:.2%} | {cluster_count_agreement:.2%} | "
             "{correct_cluster_ratio:.2%} | {predicted_cluster_count} |".format(
+                platform=platform, **result
+            )
+        )
+        hyperspec_rows.append(
+            "| {platform} | {incorrect_clustering_ratio:.4%} | "
+            "{completeness:.4%} | {clustered_ratio:.4%} | "
+            "{incorrect_clustered_spectra} / {num_clustered} |".format(
                 platform=platform, **result
             )
         )
@@ -392,6 +430,12 @@ the stated PeptideProphet threshold.
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 {chr(10).join(rows)}
 
+### Hyper-Spec-Compatible Metrics
+
+| Platform | Incorrect clustering ratio | Completeness | Clustered ratio | Incorrect / clustered spectra |
+|---|---:|---:|---:|---:|
+{chr(10).join(hyperspec_rows)}
+
 ## Metric Definitions
 
 - **ARI**: adjusted agreement between all same/different-cluster spectrum pairs.
@@ -402,6 +446,13 @@ the stated PeptideProphet threshold.
 - **Cluster-count agreement**: `min(K_pred, K_truth) / max(K_pred, K_truth)`.
 - **Correct cluster ratio**: truth clusters whose complete member set exactly
   matches one predicted cluster, divided by all evaluated truth clusters.
+- **Incorrect clustering ratio**: spectra differing from the majority peptide
+  assignment in each non-noise cluster, divided by all non-noise spectra.
+- **Completeness**: whether spectra with the same peptide assignment are placed
+  in the same predicted cluster.
+- **Clustered ratio**: spectra not assigned the noise label `-1`, divided by all
+  evaluated spectra. Singleton clusters count as clustered for compatibility
+  with the Hyper-Spec evaluator.
 - Falcon noise label `-1` is converted to one singleton cluster per spectrum.
 - Cluster labels are charge-namespaced before comparison.
 
@@ -409,8 +460,10 @@ the stated PeptideProphet threshold.
 
 - Algorithm: {pim['algorithm']}
 - HDC dimension: {pim['hv_dimension']}
-- Threshold ratio: {pim['threshold_ratio']}
+- Threshold ratio: {pim['threshold_ratio']} of the fixed {pim['hv_dimension']}-bit HV width
 - Bucket width: {pim['bucket_width_da']} Da, additionally separated by charge
+- Input-charge fallback count: {scope['input_charge_fallback_count']:,}
+- Input-charge/truth mismatch count: {scope['input_charge_truth_mismatch_count']:,}
 - Functional encoding time: {pim['encoding_s']:.6f} s
 - Functional clustering time: {pim['functional_clustering_s']:.6f} s
 
@@ -443,8 +496,8 @@ def main() -> int:
         "--max-per-truth-cluster", type=int, default=0,
         help="maximum spectra per truth cluster; 0 keeps all members",
     )
-    parser.add_argument("--threshold-ratio", type=float, default=0.45)
-    parser.add_argument("--bucket-width", type=float, default=10.0)
+    parser.add_argument("--threshold-ratio", type=float, default=0.455)
+    parser.add_argument("--bucket-width", type=float, default=5.0)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -477,7 +530,17 @@ def main() -> int:
     if max(selected) >= len(all_spectra):
         raise RuntimeError("Truth spectrum index exceeds parsed MGF spectrum count")
     spectra = [all_spectra[index] for index in selected]
-    charges = [int(truth[index]["charge"]) for index in selected]
+    truth_charges = [int(truth[index]["charge"]) for index in selected]
+    parsed_charges = [spectrum.get("precursor_charge") for _name, spectrum in spectra]
+    charges = [
+        int(parsed) if parsed is not None else truth_charge
+        for parsed, truth_charge in zip(parsed_charges, truth_charges)
+    ]
+    charge_fallback_count = sum(charge is None for charge in parsed_charges)
+    charge_mismatch_count = sum(
+        parsed is not None and int(parsed) != truth_charge
+        for parsed, truth_charge in zip(parsed_charges, truth_charges)
+    )
     truth_labels = [str(truth[index]["truth_label"]) for index in selected]
 
     falcon_rows = falcon_by_index.loc[selected]
@@ -518,6 +581,8 @@ def main() -> int:
             "max_spectra": args.max_spectra,
             "max_per_truth_cluster": args.max_per_truth_cluster,
             "selection_is_exhaustive": len(selected) == eligible_spectra,
+            "input_charge_fallback_count": charge_fallback_count,
+            "input_charge_truth_mismatch_count": charge_mismatch_count,
         },
         "crosswalk": crosswalk,
         "multiram_functional_model": pim_details,

@@ -123,7 +123,7 @@ def parse_args() -> argparse.Namespace:
         help="Optional OMS candidate cap passed to pim_hyperoms_estimator.py; 0 means no cap.",
     )
     parser.add_argument("--progress-interval", type=int, default=2000)
-    parser.add_argument("--cluster-bucket-width-da", type=float, default=10.0)
+    parser.add_argument("--cluster-bucket-width-da", type=float, default=5.0)
     parser.add_argument("--disable-fenand-coarse-filter", action="store_true")
     parser.add_argument("--fenand-metadata-bytes-per-spectrum", type=float, default=16.0)
     parser.add_argument("--fenand-output-bytes-per-spectrum", type=float, default=256.0)

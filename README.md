@@ -12,7 +12,7 @@ model outputs unless a result is explicitly labeled as measured.
 | Full-pipeline driver | `run_pim_full_pipeline_timing.py` | Runs selected stages, adds their modeled latencies, and writes JSON/Markdown summaries. |
 | Genomic PNM | `GenDP/GenDRAM/` | Performs minigraph-like sequence-to-graph alignment and maps seeding/alignment work onto the 32 GB M3D DRAM model. |
 | FeRAM clustering | `FeRAM_simulation/` and `proteomic_full_pipeline/` | Encodes spectra as hypervectors and estimates FeRAM clustering latency and energy. |
-| FeNAND coarse filter | `sumukh_proteomic_test/gpu_benchmark.py` | Streams precursor metadata, assigns 10 Da buckets, and removes cross-bucket candidate pairs before FeRAM clustering. |
+| FeNAND coarse filter | `sumukh_proteomic_test/gpu_benchmark.py` | Streams precursor metadata, assigns charge-aware 5 Da buckets, and removes cross-bucket candidate pairs before FeRAM clustering. |
 | FeRAM OMS | `proteomic_full_pipeline/pim_hyperoms_estimator.py` | Runs HyperOMS-style candidate search, HDC similarity, target-decoy filtering, and reports modeled PIM cost. |
 | MoE | `TRPCA-MOE-2/TRPCA_MoE/` | Runs the downstream Top-1 mixture-of-experts model or reuses a cached timing result. |
 | Package transfer | Full-pipeline driver | Models host, FeNAND, FeRAM, M3D DRAM, ring, and UCIe transfers as `sum(bytes_i / bandwidth_i)`. |
@@ -23,6 +23,9 @@ The M3D DRAM organization is documented in
 32 channels, one PU per channel, and eight 1 Gb logical banks per channel.
 The FeNAND assumptions and latency/energy equations are documented in
 [`FENAND_COARSE_FILTER_MODEL.md`](FENAND_COARSE_FILTER_MODEL.md).
+The clustering-quality calibration, tradeoffs, and b1926-b1930 validation are
+reported in
+[`MULTIRAM_CLUSTERING_QUALITY_OPTIMIZATION.md`](MULTIRAM_CLUSTERING_QUALITY_OPTIMIZATION.md).
 
 ## Setup
 

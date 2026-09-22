@@ -2,6 +2,7 @@ import argparse
 import heapq
 import math
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -103,6 +104,7 @@ def parse_mgf_file(file_path, max_peaks=50, mz_max=2000.0):
     in_block = False
     current_title = None
     precursor_mz = None
+    precursor_charge = None
     mz_list = []
     intensity_list = []
     spec_index = 0
@@ -118,6 +120,7 @@ def parse_mgf_file(file_path, max_peaks=50, mz_max=2000.0):
                 in_block = True
                 current_title = None
                 precursor_mz = None
+                precursor_charge = None
                 mz_list = []
                 intensity_list = []
                 continue
@@ -128,7 +131,17 @@ def parse_mgf_file(file_path, max_peaks=50, mz_max=2000.0):
                     spec_index += 1
                     spec_id = current_title or f"{base}#S{spec_index:04d}"
                     mz, inten = _select_top_peaks(mz_list, intensity_list, max_peaks)
-                    spectra.append((spec_id, {"mz": mz, "intensity": inten, "precursor_mz": precursor_mz}))
+                    spectra.append(
+                        (
+                            spec_id,
+                            {
+                                "mz": mz,
+                                "intensity": inten,
+                                "precursor_mz": precursor_mz,
+                                "precursor_charge": precursor_charge,
+                            },
+                        )
+                    )
                 continue
 
             if not in_block:
@@ -144,6 +157,12 @@ def parse_mgf_file(file_path, max_peaks=50, mz_max=2000.0):
                         precursor_mz = float(value.strip().split()[0])
                     except ValueError:
                         precursor_mz = None
+                elif key == "CHARGE":
+                    match = re.search(r"[-+]?\d+", value)
+                    try:
+                        precursor_charge = abs(int(match.group(0))) if match else None
+                    except ValueError:
+                        precursor_charge = None
                 continue
 
             parts = line.split()
@@ -183,6 +202,9 @@ def write_mgf_file(spectra, output_path):
             precursor_mz = spectrum.get("precursor_mz")
             if precursor_mz is not None:
                 handle.write(f"PEPMASS={precursor_mz}\n")
+            precursor_charge = spectrum.get("precursor_charge")
+            if precursor_charge is not None:
+                handle.write(f"CHARGE={int(precursor_charge)}+\n")
 
             mz_vals = spectrum["mz"]
             inten_vals = spectrum["intensity"]
@@ -363,12 +385,14 @@ def _get_precursor_mz(spectrum):
     return float(np.median(mz))
 
 
-def bucket_spectra_by_precursor(spectra, bucket_width=10.0):
+def bucket_spectra_by_precursor(spectra, bucket_width=5.0):
     buckets = {}
     for idx, (_, spectrum) in enumerate(spectra):
         precursor = _get_precursor_mz(spectrum)
         bucket_id = int(precursor // bucket_width) if bucket_width > 0 else 0
-        buckets.setdefault(bucket_id, []).append(idx)
+        charge = spectrum.get("precursor_charge")
+        charge_id = int(charge) if charge is not None else 0
+        buckets.setdefault((charge_id, bucket_id), []).append(idx)
     return buckets
 
 
@@ -466,12 +490,19 @@ def _hamming_distance_matrix_gpu(hvs):
     return dist.detach().cpu().numpy().astype(np.float32), matmul_s
 
 
-def nn_chain_hac_from_distance(distance_matrix, threshold_ratio=0.45):
+def nn_chain_hac_from_distance(
+    distance_matrix,
+    threshold_ratio=0.455,
+    hv_dimension=2048,
+):
     if distance_matrix.shape[0] <= 1:
         return [[0]] if distance_matrix.shape[0] == 1 else []
 
-    dim = int(np.max(distance_matrix)) * 2 if distance_matrix.size else 0
-    threshold = threshold_ratio * dim if dim > 0 else np.inf
+    # The ratio is defined against the fixed HV width. Scaling it from the
+    # largest distance in each bucket makes the clustering criterion depend on
+    # bucket composition and causes quality to drift across datasets.
+    dim = max(1, int(hv_dimension))
+    threshold = threshold_ratio * dim
     clusters = [[idx] for idx in range(distance_matrix.shape[0])]
     dist = distance_matrix.copy()
 
@@ -570,7 +601,7 @@ def estimate_feram_bucket_clustering_neurosim(
 
 def estimate_feram_clustering_from_spectra(
     spectra,
-    bucket_width=10.0,
+    bucket_width=5.0,
     max_items_per_bucket=2000,
     d_dim=2048,
     num_tiles=32,
@@ -937,8 +968,8 @@ def estimate_fenand_to_feram_transfer(
 def benchmark_nn_chain_clustering(
     encoded_hvs,
     spectra,
-    threshold_ratio=0.45,
-    bucket_width=10.0,
+    threshold_ratio=0.455,
+    bucket_width=5.0,
     max_items_per_bucket=2000,
     use_gpu_distance=False,
     d_dim=2048,
@@ -1012,7 +1043,11 @@ def benchmark_nn_chain_clustering(
             dist = _hamming_distance_matrix_numpy(hvs_bucket)
 
         hac_start = time.perf_counter()
-        local_clusters = nn_chain_hac_from_distance(dist, threshold_ratio=threshold_ratio)
+        local_clusters = nn_chain_hac_from_distance(
+            dist,
+            threshold_ratio=threshold_ratio,
+            hv_dimension=d_dim,
+        )
         hac_end = time.perf_counter()
         cpu_hac_s += hac_end - hac_start
         total_clusters += len(local_clusters)
@@ -1085,8 +1120,8 @@ def run_benchmark(
     encode_hw_clock_hz=500e6,
     encode_hw_energy_pj_per_query=50.0,
     gpu_cluster_power_w=300.0,
-    cluster_threshold_ratio=0.45,
-    cluster_bucket_width=10.0,
+    cluster_threshold_ratio=0.455,
+    cluster_bucket_width=5.0,
     cluster_max_items_per_bucket=2000,
     benchmark_repeats=7,
 ):
@@ -1340,8 +1375,8 @@ def parse_args():
     parser.add_argument("--encode-hw-energy-pj-per-query", type=float, default=50.0)
     parser.add_argument("--gpu-cluster-power-w", type=float, default=300.0)
 
-    parser.add_argument("--cluster-threshold-ratio", type=float, default=0.45)
-    parser.add_argument("--cluster-bucket-width", type=float, default=10.0)
+    parser.add_argument("--cluster-threshold-ratio", type=float, default=0.455)
+    parser.add_argument("--cluster-bucket-width", type=float, default=5.0)
     parser.add_argument("--cluster-max-items-per-bucket", type=int, default=2000)
 
     parser.add_argument("--benchmark-repeats", type=int, default=7)

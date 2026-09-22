@@ -3,8 +3,9 @@
 ## Functional Role
 
 The FeNAND stage reads compact precursor metadata and assigns each spectrum to
-a precursor-m/z bucket before FeRAM similarity clustering. It does not discard
-spectra. It removes only cross-bucket pair comparisons:
+a `(precursor charge, precursor-m/z bucket)` before FeRAM similarity
+clustering. It does not discard spectra. It removes only cross-bucket pair
+comparisons:
 
 ```text
 unfiltered pairs = N * (N - 1) / 2
@@ -13,14 +14,15 @@ pair survival    = filtered pairs / unfiltered pairs
 ```
 
 This makes filter selectivity dataset-derived. The default bucket width is
-10 Da, matching the clustering model that was previously treated as free host
-preprocessing.
+5 Da. Charge comes from the MGF `CHARGE` field and is not inferred from peptide
+truth.
 
 ## Default Parameters
 
 | Parameter | Default | Status |
 | --- | ---: | --- |
-| Bucket width | 10 Da | Algorithm/model parameter |
+| Bucket key | Precursor charge + 5 Da m/z bin | Quality-calibrated algorithm parameter |
+| Hamming threshold | 0.455 x 2048 bits | Quality-calibrated algorithm parameter |
 | Metadata per spectrum | 16 B | Assumed compact precursor/index record |
 | FeNAND-to-FeRAM payload | 256 B/spectrum | Assumed packed 2048-bit HV |
 | FeNAND decompressed stream | 8.1 GB/s | MultiRAM architecture input |
@@ -57,9 +59,20 @@ precursor bucketing was modeled as free host preprocessing.
 ## Interpretation
 
 The pair-reduction percentage is measured from bucket occupancy for every
-dataset. The filter does not claim a spectrum-rejection rate, and therefore
-does not change cluster assignments by itself. Quality metrics should remain
-identical for a fixed bucket width; only hardware latency and energy change.
+dataset. The filter does not claim a spectrum-rejection rate. For a fixed
+charge/bucket policy, moving the same candidate generation from the host into
+FeNAND does not change cluster assignments; changing the bucket width or
+Hamming threshold does change clustering quality and must be re-evaluated.
+
+The Hamming cutoff is always computed from the fixed hypervector dimension:
+
+```text
+Hamming cutoff = threshold_ratio * HV_dimension
+               = 0.455 * 2048
+```
+
+It is not scaled from the maximum observed distance in a bucket, because that
+would make the decision boundary depend on the other spectra in that bucket.
 
 The simulator also reports an unfiltered FeRAM baseline in which all spectra
 occupy one bucket. `speedup_vs_unfiltered_feram` includes FeNAND overhead and

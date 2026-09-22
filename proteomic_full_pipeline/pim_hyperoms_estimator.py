@@ -341,7 +341,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-peaks", type=int, default=50)
     parser.add_argument("--mz-max", type=float, default=2000.0)
-    parser.add_argument("--cluster-bucket-width-da", type=float, default=10.0)
+    parser.add_argument("--cluster-bucket-width-da", type=float, default=5.0)
     parser.add_argument(
         "--disable-fenand-coarse-filter",
         action="store_true",
