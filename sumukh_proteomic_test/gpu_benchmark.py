@@ -372,6 +372,80 @@ def bucket_spectra_by_precursor(spectra, bucket_width=10.0):
     return buckets
 
 
+def estimate_fenand_coarse_filter(
+    spectra,
+    buckets,
+    metadata_bytes_per_spectrum=16.0,
+    output_bytes_per_spectrum=256.0,
+    decompressed_stream_gbps=8.1,
+    package_link_gbps=256.0,
+    setup_overhead_us=50.0,
+    filter_energy_pj_per_spectrum=20.0,
+    package_link_energy_pj_per_bit=0.8,
+):
+    """Model metadata bucketing in FeNAND before FeRAM clustering.
+
+    All spectra survive. The filter removes cross-bucket pair comparisons, so
+    selectivity is derived from the observed bucket occupancy rather than an
+    assumed spectrum drop rate. The emitted payload is one packed 2048-bit HV
+    per spectrum by default.
+    """
+    num_spectra = len(spectra)
+    unfiltered_pairs = num_spectra * (num_spectra - 1) // 2
+    candidate_pairs = sum(
+        len(indices) * (len(indices) - 1) // 2 for indices in buckets.values()
+    )
+    pair_survival_ratio = (
+        candidate_pairs / unfiltered_pairs if unfiltered_pairs else 0.0
+    )
+
+    metadata_bytes = num_spectra * max(0.0, float(metadata_bytes_per_spectrum))
+    output_bytes = num_spectra * max(0.0, float(output_bytes_per_spectrum))
+    storage_gbps = max(float(decompressed_stream_gbps), 1e-12)
+    link_gbps = max(float(package_link_gbps), 1e-12)
+    effective_output_gbps = min(storage_gbps, link_gbps)
+
+    setup_s = max(0.0, float(setup_overhead_us)) * 1e-6
+    metadata_scan_s = metadata_bytes / (storage_gbps * 1e9)
+    output_transfer_s = output_bytes / (effective_output_gbps * 1e9)
+    total_s = setup_s + metadata_scan_s + output_transfer_s
+
+    internal_energy_j = (
+        num_spectra * max(0.0, float(filter_energy_pj_per_spectrum)) * 1e-12
+    )
+    link_energy_j = (
+        output_bytes
+        * 8.0
+        * max(0.0, float(package_link_energy_pj_per_bit))
+        * 1e-12
+    )
+    total_energy_mj = (internal_energy_j + link_energy_j) * 1e3
+
+    return {
+        "fenand_filter_enabled": True,
+        "fenand_filter_setup_s": setup_s,
+        "fenand_metadata_scan_s": metadata_scan_s,
+        "fenand_to_feram_transfer_s": output_transfer_s,
+        "fenand_filter_total_s": total_s,
+        "fenand_filter_internal_energy_mj": internal_energy_j * 1e3,
+        "fenand_to_feram_link_energy_mj": link_energy_j * 1e3,
+        "fenand_filter_total_energy_mj": total_energy_mj,
+        "fenand_metadata_bytes": int(metadata_bytes),
+        "fenand_to_feram_bytes": int(output_bytes),
+        "fenand_effective_output_GBps": effective_output_gbps,
+        "unfiltered_candidate_pairs": int(unfiltered_pairs),
+        "filtered_candidate_pairs": int(candidate_pairs),
+        "candidate_pair_survival_ratio": pair_survival_ratio,
+        "candidate_pair_reduction_percent": 100.0 * (1.0 - pair_survival_ratio),
+        "spectrum_survival_ratio": 1.0 if num_spectra else 0.0,
+        "model_provenance": (
+            "8.1 GB/s FeNAND stream and 256 GB/s package link are architecture "
+            "inputs; setup latency, bytes/record, internal filter energy, and "
+            "package-link energy are explicit modeling assumptions."
+        ),
+    }
+
+
 def _hamming_distance_matrix_numpy(hvs):
     dim = hvs.shape[1]
     dot = hvs.astype(np.int32) @ hvs.astype(np.int32).T
@@ -515,17 +589,65 @@ def estimate_feram_clustering_from_spectra(
     neurosim_cell_read_energy_fj=2.0,
     neurosim_adc_energy_fj_per_col=200.0,
     neurosim_digital_energy_fj_per_col=50.0,
+    fenand_coarse_filter=True,
+    fenand_metadata_bytes_per_spectrum=16.0,
+    fenand_output_bytes_per_spectrum=256.0,
+    fenand_decompressed_stream_gbps=8.1,
+    fenand_package_link_gbps=256.0,
+    fenand_setup_overhead_us=50.0,
+    fenand_filter_energy_pj_per_spectrum=20.0,
+    package_link_energy_pj_per_bit=0.8,
 ):
     buckets = bucket_spectra_by_precursor(spectra, bucket_width=bucket_width)
+
+    if fenand_coarse_filter:
+        fenand = estimate_fenand_coarse_filter(
+            spectra=spectra,
+            buckets=buckets,
+            metadata_bytes_per_spectrum=fenand_metadata_bytes_per_spectrum,
+            output_bytes_per_spectrum=fenand_output_bytes_per_spectrum,
+            decompressed_stream_gbps=fenand_decompressed_stream_gbps,
+            package_link_gbps=fenand_package_link_gbps,
+            setup_overhead_us=fenand_setup_overhead_us,
+            filter_energy_pj_per_spectrum=fenand_filter_energy_pj_per_spectrum,
+            package_link_energy_pj_per_bit=package_link_energy_pj_per_bit,
+        )
+    else:
+        num_spectra = len(spectra)
+        unfiltered_pairs = num_spectra * (num_spectra - 1) // 2
+        filtered_pairs = sum(
+            len(indices) * (len(indices) - 1) // 2
+            for indices in buckets.values()
+        )
+        fenand = {
+            "fenand_filter_enabled": False,
+            "fenand_filter_total_s": 0.0,
+            "fenand_filter_total_energy_mj": 0.0,
+            "unfiltered_candidate_pairs": int(unfiltered_pairs),
+            "filtered_candidate_pairs": int(filtered_pairs),
+            "candidate_pair_survival_ratio": (
+                filtered_pairs / unfiltered_pairs if unfiltered_pairs else 0.0
+            ),
+            "candidate_pair_reduction_percent": (
+                100.0 * (1.0 - filtered_pairs / unfiltered_pairs)
+                if unfiltered_pairs else 0.0
+            ),
+            "spectrum_survival_ratio": 1.0 if num_spectra else 0.0,
+            "model_provenance": "Host-side bucketing; FeNAND cost disabled.",
+        }
 
     feram_bucket_time_s = 0.0
     feram_bucket_energy_mj = 0.0
     feram_serial_cycles_acc = 0
     feram_used_buckets = 0
+    bucket_sizes = [len(indices) for indices in buckets.values()]
+    bucket_overflow_count = sum(
+        size > max_items_per_bucket
+        for size in bucket_sizes
+        if max_items_per_bucket is not None and max_items_per_bucket > 0
+    )
 
     for _, indices in buckets.items():
-        if max_items_per_bucket is not None and len(indices) > max_items_per_bucket:
-            indices = indices[:max_items_per_bucket]
         if len(indices) <= 1:
             continue
 
@@ -555,12 +677,24 @@ def estimate_feram_clustering_from_spectra(
         feram_serial_cycles_acc += feram_bucket["feram_bucket_serial_cycles"]
         feram_used_buckets += 1
 
-    return {
+    result = {
         "feram_cluster_core_s": feram_bucket_time_s,
         "feram_cluster_energy_mj": feram_bucket_energy_mj,
         "feram_avg_serial_cycles": (feram_serial_cycles_acc / feram_used_buckets) if feram_used_buckets else 0.0,
         "num_buckets": len(buckets),
+        "max_bucket_size": max(bucket_sizes, default=0),
+        "bucket_overflow_count": bucket_overflow_count,
+        "bucket_width_da": float(bucket_width),
+        "multiram_cluster_total_s": (
+            float(fenand["fenand_filter_total_s"]) + feram_bucket_time_s
+        ),
+        "multiram_cluster_total_energy_mj": (
+            float(fenand["fenand_filter_total_energy_mj"])
+            + feram_bucket_energy_mj
+        ),
     }
+    result.update(fenand)
+    return result
 
 
 def benchmark_gpu_hyperspec(
@@ -1073,7 +1207,7 @@ def run_benchmark(
                 hyperoms_workdir=hyperoms_workdir,
             )
 
-            pim_cluster_s = float(pim_cluster["feram_cluster_core_s"])
+            pim_cluster_s = float(pim_cluster["multiram_cluster_total_s"])
             pim_oms_core_s = float(pim_oms["feram_neurosim_time_s"])
             pim_oms_s = pim_oms_core_s + pim_fixed_oms_s + float(fenand_transfer["fenand_to_feram_total_s"])
             pim_e2e_s = pim_cluster_s + pim_oms_s

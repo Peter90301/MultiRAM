@@ -123,6 +123,14 @@ def parse_args() -> argparse.Namespace:
         help="Optional OMS candidate cap passed to pim_hyperoms_estimator.py; 0 means no cap.",
     )
     parser.add_argument("--progress-interval", type=int, default=2000)
+    parser.add_argument("--cluster-bucket-width-da", type=float, default=10.0)
+    parser.add_argument("--disable-fenand-coarse-filter", action="store_true")
+    parser.add_argument("--fenand-metadata-bytes-per-spectrum", type=float, default=16.0)
+    parser.add_argument("--fenand-output-bytes-per-spectrum", type=float, default=256.0)
+    parser.add_argument("--fenand-filter-setup-us", type=float, default=50.0)
+    parser.add_argument(
+        "--fenand-filter-energy-pj-per-spectrum", type=float, default=20.0
+    )
 
     parser.add_argument("--skip-moe", action="store_true")
     parser.add_argument(
@@ -455,7 +463,25 @@ def run_proteomic_clustering(args: argparse.Namespace, out_dir: Path) -> StageTi
         "clustering",
         "--query",
         str(Path(args.proteomic_query)),
+        "--cluster-bucket-width-da",
+        str(args.cluster_bucket_width_da),
+        "--fenand-metadata-bytes-per-spectrum",
+        str(args.fenand_metadata_bytes_per_spectrum),
+        "--fenand-output-bytes-per-spectrum",
+        str(args.fenand_output_bytes_per_spectrum),
+        "--fenand-decompressed-gbps",
+        str(args.fenand_decompressed_gbps),
+        "--fenand-package-link-gbps",
+        str(args.feram_external_gbps),
+        "--fenand-filter-setup-us",
+        str(args.fenand_filter_setup_us),
+        "--fenand-filter-energy-pj-per-spectrum",
+        str(args.fenand_filter_energy_pj_per_spectrum),
+        "--package-link-energy-pj-per-bit",
+        str(args.package_link_energy_pj_per_bit),
     ]
+    if args.disable_fenand_coarse_filter:
+        cmd.append("--disable-fenand-coarse-filter")
     rc, wall = run_command(cmd, PROTEOMIC_DIR, log_path)
     payload = extract_last_json(read_text(log_path))
     latency = None
@@ -463,14 +489,19 @@ def run_proteomic_clustering(args: argparse.Namespace, out_dir: Path) -> StageTi
     summary_path = out_dir / "proteomic_pim/pim_clustering_summary.json"
     if payload is not None:
         result = payload.get("result", {})
-        if "feram_cluster_core_s" in result:
+        if "multiram_cluster_total_s" in result:
+            latency = float(result["multiram_cluster_total_s"])
+        elif "feram_cluster_core_s" in result:
             latency = float(result["feram_cluster_core_s"])
         summary_path.parent.mkdir(parents=True, exist_ok=True)
         summary_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         notes = (
             f"num_spectra={payload.get('num_spectra')}; "
             f"num_buckets={result.get('num_buckets')}; "
-            f"energy_mj={result.get('feram_cluster_energy_mj')}"
+            f"pair_reduction_percent={result.get('candidate_pair_reduction_percent')}; "
+            f"fenand_filter_s={result.get('fenand_filter_total_s')}; "
+            f"feram_core_s={result.get('feram_cluster_core_s')}; "
+            f"energy_mj={result.get('multiram_cluster_total_energy_mj')}"
         )
     return StageTiming(
         stage="proteomic_feram_pim_clustering",
@@ -671,9 +702,18 @@ def run_transfer(args: argparse.Namespace, out_dir: Path, stages: list[StageTimi
                     "latency_sec": transfer_time_sec(reference_bytes, args.fenand_decompressed_gbps),
                 },
                 "feram_oms_external_link": {
-                    "bytes": proteomic_query_bytes,
+                    "bytes": (
+                        proteomic_query_bytes
+                        if not args.skip_proteomic and not args.skip_proteomic_oms
+                        else 0
+                    ),
                     "bandwidth_GBps": float(args.feram_external_gbps),
-                    "latency_sec": transfer_time_sec(proteomic_query_bytes, args.feram_external_gbps),
+                    "latency_sec": transfer_time_sec(
+                        proteomic_query_bytes
+                        if not args.skip_proteomic and not args.skip_proteomic_oms
+                        else 0,
+                        args.feram_external_gbps,
+                    ),
                 },
                 "dram_external_interface": {
                     "bytes": genomic_query_bytes + feature_bytes,

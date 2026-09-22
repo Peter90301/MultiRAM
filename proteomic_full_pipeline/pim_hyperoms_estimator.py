@@ -341,6 +341,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-peaks", type=int, default=50)
     parser.add_argument("--mz-max", type=float, default=2000.0)
+    parser.add_argument("--cluster-bucket-width-da", type=float, default=10.0)
+    parser.add_argument(
+        "--disable-fenand-coarse-filter",
+        action="store_true",
+        help="Keep precursor bucketing but model it as free host preprocessing.",
+    )
+    parser.add_argument("--fenand-metadata-bytes-per-spectrum", type=float, default=16.0)
+    parser.add_argument("--fenand-output-bytes-per-spectrum", type=float, default=256.0)
+    parser.add_argument("--fenand-decompressed-gbps", type=float, default=8.1)
+    parser.add_argument("--fenand-package-link-gbps", type=float, default=256.0)
+    parser.add_argument("--fenand-filter-setup-us", type=float, default=50.0)
+    parser.add_argument(
+        "--fenand-filter-energy-pj-per-spectrum", type=float, default=20.0
+    )
+    parser.add_argument("--package-link-energy-pj-per-bit", type=float, default=0.8)
     return parser.parse_args()
 
 
@@ -1264,7 +1279,7 @@ def main() -> int:
     if args.mode == "clustering":
         result = estimate_feram_clustering_from_spectra(
             spectra,
-            bucket_width=10.0,
+            bucket_width=args.cluster_bucket_width_da,
             max_items_per_bucket=2000,
             d_dim=2048,
             num_tiles=32,
@@ -1283,6 +1298,16 @@ def main() -> int:
             neurosim_cell_read_energy_fj=2.0,
             neurosim_adc_energy_fj_per_col=200.0,
             neurosim_digital_energy_fj_per_col=50.0,
+            fenand_coarse_filter=not args.disable_fenand_coarse_filter,
+            fenand_metadata_bytes_per_spectrum=args.fenand_metadata_bytes_per_spectrum,
+            fenand_output_bytes_per_spectrum=args.fenand_output_bytes_per_spectrum,
+            fenand_decompressed_stream_gbps=args.fenand_decompressed_gbps,
+            fenand_package_link_gbps=args.fenand_package_link_gbps,
+            fenand_setup_overhead_us=args.fenand_filter_setup_us,
+            fenand_filter_energy_pj_per_spectrum=(
+                args.fenand_filter_energy_pj_per_spectrum
+            ),
+            package_link_energy_pj_per_bit=args.package_link_energy_pj_per_bit,
         )
         print(json.dumps({"num_spectra": n, "mode": args.mode, "result": result}, indent=2))
         return 0
