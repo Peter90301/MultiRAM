@@ -60,3 +60,9 @@ The pair-reduction percentage is measured from bucket occupancy for every
 dataset. The filter does not claim a spectrum-rejection rate, and therefore
 does not change cluster assignments by itself. Quality metrics should remain
 identical for a fixed bucket width; only hardware latency and energy change.
+
+The simulator also reports an unfiltered FeRAM baseline in which all spectra
+occupy one bucket. `speedup_vs_unfiltered_feram` includes FeNAND overhead and
+must be used instead of interpreting pair reduction as runtime speedup. A
+filter can reduce energy while slightly increasing latency on a dataset that
+is not large enough to require additional FeRAM column passes.

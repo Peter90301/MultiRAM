@@ -647,6 +647,27 @@ def estimate_feram_clustering_from_spectra(
         if max_items_per_bucket is not None and max_items_per_bucket > 0
     )
 
+    unfiltered_feram = estimate_feram_bucket_clustering_neurosim(
+        bucket_size=len(spectra),
+        d_dim=d_dim,
+        num_tiles=num_tiles,
+        tile_cols=tile_cols,
+        row_parallelism=row_parallelism,
+        dac_ns=neurosim_dac_ns,
+        wl_driver_ns=neurosim_wl_driver_ns,
+        cell_read_ns=neurosim_cell_read_ns,
+        sense_amp_ns=neurosim_sense_amp_ns,
+        adc_ns=neurosim_adc_ns,
+        adder_tree_ns=neurosim_adder_tree_ns,
+        local_topk_ns=neurosim_local_topk_ns,
+        global_interconnect_ns=neurosim_global_interconnect_ns,
+        global_topk_ns=neurosim_global_topk_ns,
+        dac_energy_fj_per_row=neurosim_dac_energy_fj_per_row,
+        cell_read_energy_fj=neurosim_cell_read_energy_fj,
+        adc_energy_fj_per_col=neurosim_adc_energy_fj_per_col,
+        digital_energy_fj_per_col=neurosim_digital_energy_fj_per_col,
+    )
+
     for _, indices in buckets.items():
         if len(indices) <= 1:
             continue
@@ -677,20 +698,36 @@ def estimate_feram_clustering_from_spectra(
         feram_serial_cycles_acc += feram_bucket["feram_bucket_serial_cycles"]
         feram_used_buckets += 1
 
+    multiram_total_s = float(fenand["fenand_filter_total_s"]) + feram_bucket_time_s
+    multiram_total_energy_mj = (
+        float(fenand["fenand_filter_total_energy_mj"])
+        + feram_bucket_energy_mj
+    )
+    unfiltered_s = float(unfiltered_feram["feram_bucket_time_s"])
+    unfiltered_energy_mj = float(unfiltered_feram["feram_bucket_energy_mj"])
+
     result = {
         "feram_cluster_core_s": feram_bucket_time_s,
         "feram_cluster_energy_mj": feram_bucket_energy_mj,
+        "feram_unfiltered_baseline_s": unfiltered_s,
+        "feram_unfiltered_baseline_energy_mj": unfiltered_energy_mj,
         "feram_avg_serial_cycles": (feram_serial_cycles_acc / feram_used_buckets) if feram_used_buckets else 0.0,
         "num_buckets": len(buckets),
         "max_bucket_size": max(bucket_sizes, default=0),
         "bucket_overflow_count": bucket_overflow_count,
         "bucket_width_da": float(bucket_width),
-        "multiram_cluster_total_s": (
-            float(fenand["fenand_filter_total_s"]) + feram_bucket_time_s
+        "multiram_cluster_total_s": multiram_total_s,
+        "multiram_cluster_total_energy_mj": multiram_total_energy_mj,
+        "speedup_vs_unfiltered_feram": (
+            unfiltered_s / multiram_total_s if multiram_total_s > 0 else None
         ),
-        "multiram_cluster_total_energy_mj": (
-            float(fenand["fenand_filter_total_energy_mj"])
-            + feram_bucket_energy_mj
+        "latency_change_vs_unfiltered_percent": (
+            100.0 * (multiram_total_s / unfiltered_s - 1.0)
+            if unfiltered_s > 0 else None
+        ),
+        "energy_reduction_vs_unfiltered_percent": (
+            100.0 * (1.0 - multiram_total_energy_mj / unfiltered_energy_mj)
+            if unfiltered_energy_mj > 0 else None
         ),
     }
     result.update(fenand)
