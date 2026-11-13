@@ -9,6 +9,9 @@ import subprocess
 import sys
 import tempfile
 import time
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 import numpy as np
 import torch
@@ -335,25 +338,33 @@ def estimate_feram_neurosim_latency(
     cell_read_energy_fj=2.0,
     adc_energy_fj_per_col=200.0,
     digital_energy_fj_per_col=50.0,
+    restore_latency_ns_per_activated_row=50.0,
+    restore_energy_fj_per_bit=39.7,
+    assumed_endurance_cycles=1e12,
 ):
     rows_per_cycle = max(1, int(row_parallelism))
     serial_cycles = max(1, int(math.ceil(d_dim / rows_per_cycle)))
 
     array_cycle_ns = dac_ns + wl_driver_ns + cell_read_ns + sense_amp_ns + adc_ns
     analog_read_ns = serial_cycles * array_cycle_ns
+    restore_ns = serial_cycles * max(0.0, float(restore_latency_ns_per_activated_row))
 
     local_digital_ns = adder_tree_ns + local_topk_ns
     global_digital_ns = global_interconnect_ns + global_topk_ns
 
-    per_query_ns = analog_read_ns + local_digital_ns + global_digital_ns
+    per_query_ns = analog_read_ns + restore_ns + local_digital_ns + global_digital_ns
     total_s = (per_query_ns * num_queries) * 1e-9
 
     total_cols = num_tiles * tile_cols
+    restore_energy_fj_per_query = (
+        d_dim * total_cols * max(0.0, float(restore_energy_fj_per_bit))
+    )
     per_query_energy_fj = (
         d_dim * dac_energy_fj_per_row
         + d_dim * total_cols * cell_read_energy_fj
         + total_cols * adc_energy_fj_per_col
         + total_cols * digital_energy_fj_per_col
+        + restore_energy_fj_per_query
     )
     total_energy_mj = per_query_energy_fj * num_queries * 1e-12
 
@@ -362,6 +373,15 @@ def estimate_feram_neurosim_latency(
         "feram_neurosim_time_s": total_s,
         "feram_neurosim_energy_mj": total_energy_mj,
         "feram_neurosim_energy_nj_per_query": per_query_energy_fj * 1e-6,
+        "feram_restore_latency_ns_per_query": restore_ns,
+        "feram_restore_time_s": restore_ns * num_queries * 1e-9,
+        "feram_restore_energy_nj_per_query": restore_energy_fj_per_query * 1e-6,
+        "feram_restore_energy_mj": restore_energy_fj_per_query * num_queries * 1e-12,
+        "feram_restore_latency_ns_per_activated_row": float(restore_latency_ns_per_activated_row),
+        "feram_restore_energy_fj_per_bit": float(restore_energy_fj_per_bit),
+        "feram_assumed_endurance_cycles": float(assumed_endurance_cycles),
+        "feram_restore_cycles_per_cell_per_query": serial_cycles,
+        "feram_endurance_queries_per_cell": float(assumed_endurance_cycles) / serial_cycles,
         "feram_hw_serial_cycles": serial_cycles,
         "feram_hw_array_cycle_ns": array_cycle_ns,
         "feram_hw_tile_capacity": num_tiles * tile_cols,
@@ -403,8 +423,9 @@ def estimate_fenand_coarse_filter(
     output_bytes_per_spectrum=256.0,
     decompressed_stream_gbps=8.1,
     package_link_gbps=256.0,
-    setup_overhead_us=50.0,
-    filter_energy_pj_per_spectrum=20.0,
+    setup_overhead_us=0.0,
+    array_latency_us_per_spectrum=0.429e6 / 46665.0,
+    filter_energy_pj_per_spectrum=0.491e12 / 46665.0,
     package_link_energy_pj_per_bit=0.8,
 ):
     """Model metadata bucketing in FeNAND before FeRAM clustering.
@@ -432,7 +453,8 @@ def estimate_fenand_coarse_filter(
     setup_s = max(0.0, float(setup_overhead_us)) * 1e-6
     metadata_scan_s = metadata_bytes / (storage_gbps * 1e9)
     output_transfer_s = output_bytes / (effective_output_gbps * 1e9)
-    total_s = setup_s + metadata_scan_s + output_transfer_s
+    array_service_s = num_spectra * max(0.0, float(array_latency_us_per_spectrum)) * 1e-6
+    total_s = setup_s + array_service_s + metadata_scan_s + output_transfer_s
 
     internal_energy_j = (
         num_spectra * max(0.0, float(filter_energy_pj_per_spectrum)) * 1e-12
@@ -448,6 +470,7 @@ def estimate_fenand_coarse_filter(
     return {
         "fenand_filter_enabled": True,
         "fenand_filter_setup_s": setup_s,
+        "fenand_array_service_s": array_service_s,
         "fenand_metadata_scan_s": metadata_scan_s,
         "fenand_to_feram_transfer_s": output_transfer_s,
         "fenand_filter_total_s": total_s,
@@ -457,6 +480,8 @@ def estimate_fenand_coarse_filter(
         "fenand_metadata_bytes": int(metadata_bytes),
         "fenand_to_feram_bytes": int(output_bytes),
         "fenand_effective_output_GBps": effective_output_gbps,
+        "fenand_array_latency_us_per_spectrum": float(array_latency_us_per_spectrum),
+        "fenand_array_energy_pj_per_spectrum": float(filter_energy_pj_per_spectrum),
         "unfiltered_candidate_pairs": int(unfiltered_pairs),
         "filtered_candidate_pairs": int(candidate_pairs),
         "candidate_pair_survival_ratio": pair_survival_ratio,
@@ -519,7 +544,15 @@ def nn_chain_hac_from_distance(
 
             if len(chain) >= 2 and nn == chain[-2]:
                 if dist[last, nn] > threshold:
-                    return clusters
+                    # Another disconnected component may still contain a
+                    # merge below the cutoff; only stop after a global check.
+                    remaining = dist.copy()
+                    np.fill_diagonal(remaining, np.inf)
+                    next_i, next_j = np.unravel_index(np.argmin(remaining), remaining.shape)
+                    if remaining[next_i, next_j] > threshold:
+                        return clusters
+                    chain = [int(next_i)]
+                    continue
 
                 i, j = (last, nn) if last < nn else (nn, last)
                 clusters[i].extend(clusters[j])
@@ -557,6 +590,9 @@ def estimate_feram_bucket_clustering_neurosim(
     cell_read_energy_fj=2.0,
     adc_energy_fj_per_col=200.0,
     digital_energy_fj_per_col=50.0,
+    restore_latency_ns_per_activated_row=50.0,
+    restore_energy_fj_per_bit=39.7,
+    assumed_endurance_cycles=1e12,
 ):
     if bucket_size <= 1:
         return {
@@ -565,6 +601,8 @@ def estimate_feram_bucket_clustering_neurosim(
             "feram_bucket_serial_cycles": 0,
             "feram_bucket_hw_latency_us_per_query": 0.0,
             "feram_bucket_hw_energy_nj_per_query": 0.0,
+            "feram_bucket_restore_time_s": 0.0,
+            "feram_bucket_restore_energy_mj": 0.0,
         }
 
     total_cols = max(1, num_tiles * tile_cols)
@@ -574,19 +612,28 @@ def estimate_feram_bucket_clustering_neurosim(
 
     array_cycle_ns = dac_ns + wl_driver_ns + cell_read_ns + sense_amp_ns + adc_ns
     analog_read_ns = row_cycles * col_passes * array_cycle_ns
+    restore_ns = (
+        row_cycles
+        * col_passes
+        * max(0.0, float(restore_latency_ns_per_activated_row))
+    )
 
     local_digital_ns = adder_tree_ns + local_topk_ns
     global_digital_ns = global_interconnect_ns + global_topk_ns
-    per_query_ns = analog_read_ns + local_digital_ns + global_digital_ns
+    per_query_ns = analog_read_ns + restore_ns + local_digital_ns + global_digital_ns
 
     # Distance matrix for one bucket compares B_i queries against B_i references.
     bucket_time_s = (per_query_ns * bucket_size) * 1e-9
 
+    restore_energy_fj_per_query = (
+        d_dim * bucket_size * max(0.0, float(restore_energy_fj_per_bit))
+    )
     per_query_energy_fj = (
         d_dim * dac_energy_fj_per_row
         + d_dim * bucket_size * cell_read_energy_fj
         + bucket_size * adc_energy_fj_per_col
         + bucket_size * digital_energy_fj_per_col
+        + restore_energy_fj_per_query
     )
     bucket_energy_mj = per_query_energy_fj * bucket_size * 1e-12
 
@@ -596,6 +643,13 @@ def estimate_feram_bucket_clustering_neurosim(
         "feram_bucket_serial_cycles": row_cycles * col_passes,
         "feram_bucket_hw_latency_us_per_query": per_query_ns * 1e-3,
         "feram_bucket_hw_energy_nj_per_query": per_query_energy_fj * 1e-6,
+        "feram_bucket_restore_time_s": restore_ns * bucket_size * 1e-9,
+        "feram_bucket_restore_energy_mj": restore_energy_fj_per_query * bucket_size * 1e-12,
+        "feram_restore_latency_ns_per_activated_row": float(restore_latency_ns_per_activated_row),
+        "feram_restore_energy_fj_per_bit": float(restore_energy_fj_per_bit),
+        "feram_assumed_endurance_cycles": float(assumed_endurance_cycles),
+        "feram_restore_cycles_per_cell_per_query": row_cycles * col_passes,
+        "feram_endurance_queries_per_cell": float(assumed_endurance_cycles) / (row_cycles * col_passes),
     }
 
 
@@ -620,13 +674,17 @@ def estimate_feram_clustering_from_spectra(
     neurosim_cell_read_energy_fj=2.0,
     neurosim_adc_energy_fj_per_col=200.0,
     neurosim_digital_energy_fj_per_col=50.0,
+    restore_latency_ns_per_activated_row=50.0,
+    restore_energy_fj_per_bit=39.7,
+    assumed_endurance_cycles=1e12,
     fenand_coarse_filter=True,
     fenand_metadata_bytes_per_spectrum=16.0,
     fenand_output_bytes_per_spectrum=256.0,
     fenand_decompressed_stream_gbps=8.1,
     fenand_package_link_gbps=256.0,
-    fenand_setup_overhead_us=50.0,
-    fenand_filter_energy_pj_per_spectrum=20.0,
+    fenand_setup_overhead_us=0.0,
+    fenand_array_latency_us_per_spectrum=0.429e6 / 46665.0,
+    fenand_filter_energy_pj_per_spectrum=0.491e12 / 46665.0,
     package_link_energy_pj_per_bit=0.8,
 ):
     buckets = bucket_spectra_by_precursor(spectra, bucket_width=bucket_width)
@@ -640,6 +698,7 @@ def estimate_feram_clustering_from_spectra(
             decompressed_stream_gbps=fenand_decompressed_stream_gbps,
             package_link_gbps=fenand_package_link_gbps,
             setup_overhead_us=fenand_setup_overhead_us,
+            array_latency_us_per_spectrum=fenand_array_latency_us_per_spectrum,
             filter_energy_pj_per_spectrum=fenand_filter_energy_pj_per_spectrum,
             package_link_energy_pj_per_bit=package_link_energy_pj_per_bit,
         )
@@ -669,6 +728,8 @@ def estimate_feram_clustering_from_spectra(
 
     feram_bucket_time_s = 0.0
     feram_bucket_energy_mj = 0.0
+    feram_restore_time_s = 0.0
+    feram_restore_energy_mj = 0.0
     feram_serial_cycles_acc = 0
     feram_used_buckets = 0
     bucket_sizes = [len(indices) for indices in buckets.values()]
@@ -697,6 +758,9 @@ def estimate_feram_clustering_from_spectra(
         cell_read_energy_fj=neurosim_cell_read_energy_fj,
         adc_energy_fj_per_col=neurosim_adc_energy_fj_per_col,
         digital_energy_fj_per_col=neurosim_digital_energy_fj_per_col,
+        restore_latency_ns_per_activated_row=restore_latency_ns_per_activated_row,
+        restore_energy_fj_per_bit=restore_energy_fj_per_bit,
+        assumed_endurance_cycles=assumed_endurance_cycles,
     )
 
     for _, indices in buckets.items():
@@ -723,9 +787,14 @@ def estimate_feram_clustering_from_spectra(
             cell_read_energy_fj=neurosim_cell_read_energy_fj,
             adc_energy_fj_per_col=neurosim_adc_energy_fj_per_col,
             digital_energy_fj_per_col=neurosim_digital_energy_fj_per_col,
+            restore_latency_ns_per_activated_row=restore_latency_ns_per_activated_row,
+            restore_energy_fj_per_bit=restore_energy_fj_per_bit,
+            assumed_endurance_cycles=assumed_endurance_cycles,
         )
         feram_bucket_time_s += feram_bucket["feram_bucket_time_s"]
         feram_bucket_energy_mj += feram_bucket["feram_bucket_energy_mj"]
+        feram_restore_time_s += feram_bucket["feram_bucket_restore_time_s"]
+        feram_restore_energy_mj += feram_bucket["feram_bucket_restore_energy_mj"]
         feram_serial_cycles_acc += feram_bucket["feram_bucket_serial_cycles"]
         feram_used_buckets += 1
 
@@ -740,6 +809,11 @@ def estimate_feram_clustering_from_spectra(
     result = {
         "feram_cluster_core_s": feram_bucket_time_s,
         "feram_cluster_energy_mj": feram_bucket_energy_mj,
+        "feram_restore_time_s": feram_restore_time_s,
+        "feram_restore_energy_mj": feram_restore_energy_mj,
+        "feram_restore_latency_ns_per_activated_row": float(restore_latency_ns_per_activated_row),
+        "feram_restore_energy_fj_per_bit": float(restore_energy_fj_per_bit),
+        "feram_assumed_endurance_cycles": float(assumed_endurance_cycles),
         "feram_unfiltered_baseline_s": unfiltered_s,
         "feram_unfiltered_baseline_energy_mj": unfiltered_energy_mj,
         "feram_avg_serial_cycles": (feram_serial_cycles_acc / feram_used_buckets) if feram_used_buckets else 0.0,
@@ -922,19 +996,27 @@ def benchmark_gpu_rapids_clustering(encoded_hvs, eps=0.45):
 
 def estimate_encoding_hw(
     num_queries,
+    query_batch_size=32,
     cycles_per_query=100,
     clock_hz=500e6,
     energy_pj_per_query=50.0,
 ):
+    batch_size = max(1, int(query_batch_size))
     cycles = max(1, int(cycles_per_query))
     freq = max(1.0, float(clock_hz))
     per_query_s = cycles / freq
-    total_s = per_query_s * num_queries
+    num_batches = math.ceil(max(0, int(num_queries)) / batch_size)
+    total_s = per_query_s * num_batches
 
     per_query_nj = max(0.0, float(energy_pj_per_query)) * 1e-3
     total_mj = per_query_nj * num_queries * 1e-6
 
     return {
+        "placement": "FeRAM logic die",
+        "included_in_pim_oms_time": True,
+        "included_in_pim_oms_energy": True,
+        "query_batch_size": batch_size,
+        "num_query_batches": num_batches,
         "encode_hw_s": total_s,
         "encode_hw_us_per_query": per_query_s * 1e6,
         "encode_hw_energy_mj": total_mj,
@@ -1078,7 +1160,7 @@ def run_benchmark(
     subset_dir,
     subset_sizes,
     gpu_backend="hyperspec",
-    hyperspec_root="/home/tsl012/multiomic/genomic_proteomic_CPU_test/Hyper-Spec-linux",
+    hyperspec_root=str(REPO_ROOT / "external/Hyper-Spec"),
     hyperspec_main_relpath="src/main.py",
     hyperspec_use_gpu_cluster=False,
     hyperspec_cpu_core_preprocess=8,
@@ -1110,6 +1192,9 @@ def run_benchmark(
     neurosim_cell_read_energy_fj=2.0,
     neurosim_adc_energy_fj_per_col=200.0,
     neurosim_digital_energy_fj_per_col=50.0,
+    restore_latency_ns_per_activated_row=50.0,
+    restore_energy_fj_per_bit=39.7,
+    assumed_endurance_cycles=1e12,
     feram_fixed_batch_overhead_us=120.0,
     feram_fixed_io_us_per_query=0.8,
     feram_fixed_post_us_per_query=0.2,
@@ -1119,6 +1204,7 @@ def run_benchmark(
     encode_hw_cycles_per_query=100,
     encode_hw_clock_hz=500e6,
     encode_hw_energy_pj_per_query=50.0,
+    encode_hw_query_batch_size=32,
     gpu_cluster_power_w=300.0,
     cluster_threshold_ratio=0.455,
     cluster_bucket_width=5.0,
@@ -1149,6 +1235,12 @@ def run_benchmark(
         f"adc/col={neurosim_adc_energy_fj_per_col}, digital/col={neurosim_digital_energy_fj_per_col}"
     )
     print(
+        "FeRAM destructive-read restore model: "
+        f"latency={restore_latency_ns_per_activated_row} ns/activated-row-group, "
+        f"energy={restore_energy_fj_per_bit} fJ/bit, "
+        f"endurance={assumed_endurance_cycles:.3e} cycles"
+    )
+    print(
         "FeRAM fixed overhead model(us): "
         f"batch={feram_fixed_batch_overhead_us}, io/query={feram_fixed_io_us_per_query}, "
         f"post/query={feram_fixed_post_us_per_query}"
@@ -1161,7 +1253,8 @@ def run_benchmark(
     )
     print(
         "Encode HW model: "
-        f"cycles/query={encode_hw_cycles_per_query}, clock_hz={encode_hw_clock_hz:.3e}, "
+        f"query_batch_size={encode_hw_query_batch_size}, "
+        f"cycles/batch={encode_hw_cycles_per_query}, clock_hz={encode_hw_clock_hz:.3e}, "
         f"energy/query={encode_hw_energy_pj_per_query} pJ"
     )
     print(f"GPU cluster power model: {gpu_cluster_power_w:.1f} W")
@@ -1230,6 +1323,9 @@ def run_benchmark(
                 neurosim_cell_read_energy_fj=neurosim_cell_read_energy_fj,
                 neurosim_adc_energy_fj_per_col=neurosim_adc_energy_fj_per_col,
                 neurosim_digital_energy_fj_per_col=neurosim_digital_energy_fj_per_col,
+                restore_latency_ns_per_activated_row=restore_latency_ns_per_activated_row,
+                restore_energy_fj_per_bit=restore_energy_fj_per_bit,
+                assumed_endurance_cycles=assumed_endurance_cycles,
             )
 
             pim_oms = estimate_feram_neurosim_latency(
@@ -1251,6 +1347,9 @@ def run_benchmark(
                 cell_read_energy_fj=neurosim_cell_read_energy_fj,
                 adc_energy_fj_per_col=neurosim_adc_energy_fj_per_col,
                 digital_energy_fj_per_col=neurosim_digital_energy_fj_per_col,
+                restore_latency_ns_per_activated_row=restore_latency_ns_per_activated_row,
+                restore_energy_fj_per_bit=restore_energy_fj_per_bit,
+                assumed_endurance_cycles=assumed_endurance_cycles,
             )
 
             pim_fixed_oms_s = (
@@ -1267,6 +1366,13 @@ def run_benchmark(
                 bandwidth_mb_s=fenand_to_feram_bandwidth_mb_s,
                 setup_overhead_us=fenand_to_feram_setup_overhead_us,
             )
+            encoding_hw = estimate_encoding_hw(
+                num_queries=n,
+                query_batch_size=encode_hw_query_batch_size,
+                cycles_per_query=encode_hw_cycles_per_query,
+                clock_hz=encode_hw_clock_hz,
+                energy_pj_per_query=encode_hw_energy_pj_per_query,
+            )
 
             gpu_cluster = benchmark_gpu_rapids_clustering(
                 encoded_hvs=encoded_hvs,
@@ -1281,7 +1387,16 @@ def run_benchmark(
 
             pim_cluster_s = float(pim_cluster["multiram_cluster_total_s"])
             pim_oms_core_s = float(pim_oms["feram_neurosim_time_s"])
-            pim_oms_s = pim_oms_core_s + pim_fixed_oms_s + float(fenand_transfer["fenand_to_feram_total_s"])
+            pim_oms_s = (
+                float(encoding_hw["encode_hw_s"])
+                + pim_oms_core_s
+                + pim_fixed_oms_s
+                + float(fenand_transfer["fenand_to_feram_total_s"])
+            )
+            pim_oms_modeled_energy_mj = (
+                float(encoding_hw["encode_hw_energy_mj"])
+                + float(pim_oms["feram_neurosim_energy_mj"])
+            )
             pim_e2e_s = pim_cluster_s + pim_oms_s
 
             gpu_cluster_s = float(gpu_cluster["gpu_cluster_seconds"])
@@ -1323,14 +1438,21 @@ def run_benchmark(
             f"gpu_cluster_us_per_query={(gpu_cluster_s / max(1, n)) * 1e6:.3f} "
             f"gpu_oms_us_per_query={(gpu_oms_s / max(1, n)) * 1e6:.3f}"
         )
+        print(
+            "      encoding_placement=FeRAM_logic_die "
+            f"encoding_hw_s={float(encoding_hw['encode_hw_s']):.9f} "
+            f"encoding_hw_energy_mj={float(encoding_hw['encode_hw_energy_mj']):.9f} "
+            f"pim_oms_modeled_energy_mj={pim_oms_modeled_energy_mj:.9f} "
+            "encoding_time_energy_included=yes"
+        )
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Benchmark FeRAM(NeuroSIM estimate) vs A100 traditional NN-chain clustering time/energy.")
-    parser.add_argument("--dataset-dir", type=str, default="/mnt/hdd/tsunghan/raw-ms-dataset/PXD000561")
-    parser.add_argument("--subset-dir", type=str, default="/home/tsl012/multiomic/sumukh_proteomic_test/pxd000561_subsets")
+    parser.add_argument("--dataset-dir", type=str, default=str(REPO_ROOT / "data/PXD000561"))
+    parser.add_argument("--subset-dir", type=str, default=str(REPO_ROOT / "sumukh_proteomic_test/pxd000561_subsets"))
     parser.add_argument("--gpu-backend", type=str, default="hyperspec", choices=["hyperspec", "hyperoms"])
-    parser.add_argument("--hyperspec-root", type=str, default="/home/tsl012/multiomic/genomic_proteomic_CPU_test/Hyper-Spec-linux")
+    parser.add_argument("--hyperspec-root", type=str, default=str(REPO_ROOT / "external/Hyper-Spec"))
     parser.add_argument("--hyperspec-main-relpath", type=str, default="src/main.py")
     parser.add_argument("--hyperspec-use-gpu-cluster", action="store_true")
     parser.add_argument("--hyperspec-cpu-core-preprocess", type=int, default=8)
@@ -1364,6 +1486,9 @@ def parse_args():
     parser.add_argument("--neurosim-cell-read-energy-fj", type=float, default=2.0)
     parser.add_argument("--neurosim-adc-energy-fj-per-col", type=float, default=200.0)
     parser.add_argument("--neurosim-digital-energy-fj-per-col", type=float, default=50.0)
+    parser.add_argument("--restore-latency-ns-per-activated-row", type=float, default=50.0)
+    parser.add_argument("--restore-energy-fj-per-bit", type=float, default=39.7)
+    parser.add_argument("--assumed-feram-endurance-cycles", type=float, default=1e12)
     parser.add_argument("--feram-fixed-batch-overhead-us", type=float, default=120.0)
     parser.add_argument("--feram-fixed-io-us-per-query", type=float, default=0.8)
     parser.add_argument("--feram-fixed-post-us-per-query", type=float, default=0.2)
@@ -1373,6 +1498,7 @@ def parse_args():
     parser.add_argument("--encode-hw-cycles-per-query", type=int, default=100)
     parser.add_argument("--encode-hw-clock-hz", type=float, default=500e6)
     parser.add_argument("--encode-hw-energy-pj-per-query", type=float, default=50.0)
+    parser.add_argument("--encode-hw-query-batch-size", type=int, default=32)
     parser.add_argument("--gpu-cluster-power-w", type=float, default=300.0)
 
     parser.add_argument("--cluster-threshold-ratio", type=float, default=0.455)
@@ -1447,6 +1573,9 @@ if __name__ == "__main__":
         neurosim_cell_read_energy_fj=args.neurosim_cell_read_energy_fj,
         neurosim_adc_energy_fj_per_col=args.neurosim_adc_energy_fj_per_col,
         neurosim_digital_energy_fj_per_col=args.neurosim_digital_energy_fj_per_col,
+        restore_latency_ns_per_activated_row=args.restore_latency_ns_per_activated_row,
+        restore_energy_fj_per_bit=args.restore_energy_fj_per_bit,
+        assumed_endurance_cycles=args.assumed_feram_endurance_cycles,
         feram_fixed_batch_overhead_us=args.feram_fixed_batch_overhead_us,
         feram_fixed_io_us_per_query=args.feram_fixed_io_us_per_query,
         feram_fixed_post_us_per_query=args.feram_fixed_post_us_per_query,
@@ -1456,6 +1585,7 @@ if __name__ == "__main__":
         encode_hw_cycles_per_query=args.encode_hw_cycles_per_query,
         encode_hw_clock_hz=args.encode_hw_clock_hz,
         encode_hw_energy_pj_per_query=args.encode_hw_energy_pj_per_query,
+        encode_hw_query_batch_size=args.encode_hw_query_batch_size,
         gpu_cluster_power_w=args.gpu_cluster_power_w,
         cluster_threshold_ratio=args.cluster_threshold_ratio,
         cluster_bucket_width=args.cluster_bucket_width,

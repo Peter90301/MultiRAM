@@ -40,3 +40,18 @@ logs/
 !sumukh_proteomic_test/pxd000561_subsets/PXD000561_100.mgf
 !TRPCA-MOE-2/TRPCA_MoE/data/
 !TRPCA-MOE-2/TRPCA_MoE/data/train_test_split.npz
+
+# Private workspace and generated release artifacts
+audit_*/
+NewFigures/
+third_party/
+thermal_analysis/
+fenand_oms_sensitivity/
+fenand_oms_open_sensitivity/
+fenand_oms_recalibration/
+.pytest_cache/
+*.egg-info/
+build/
+*.tar.gz
+*.zip
+sumukh_proteomic_test/homs-tc/homs_tc/parser.cpp

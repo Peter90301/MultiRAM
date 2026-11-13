@@ -351,12 +351,69 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fenand-output-bytes-per-spectrum", type=float, default=256.0)
     parser.add_argument("--fenand-decompressed-gbps", type=float, default=8.1)
     parser.add_argument("--fenand-package-link-gbps", type=float, default=256.0)
-    parser.add_argument("--fenand-filter-setup-us", type=float, default=50.0)
+    parser.add_argument("--fenand-filter-setup-us", type=float, default=0.0)
+    parser.add_argument("--fenand-array-latency-us-per-spectrum", type=float, default=0.429e6 / 46665.0)
     parser.add_argument(
-        "--fenand-filter-energy-pj-per-spectrum", type=float, default=20.0
+        "--fenand-filter-energy-pj-per-spectrum", type=float, default=0.491e12 / 46665.0
     )
     parser.add_argument("--package-link-energy-pj-per-bit", type=float, default=0.8)
+    parser.add_argument("--restore-latency-ns-per-activated-row", type=float, default=50.0)
+    parser.add_argument("--restore-energy-fj-per-bit", type=float, default=39.7)
+    parser.add_argument("--assumed-feram-endurance-cycles", type=float, default=1e12)
+    parser.add_argument(
+        "--query-batch-size",
+        type=int,
+        default=32,
+        help="Queries encoded concurrently by the FeRAM logic die.",
+    )
+    parser.add_argument(
+        "--encoding-cycles-per-query",
+        type=int,
+        default=100,
+        help="Modeled FeRAM logic-die encoding latency in cycles per query batch.",
+    )
+    parser.add_argument(
+        "--encoding-clock-hz",
+        type=float,
+        default=500e6,
+        help="FeRAM logic-die encoding clock frequency.",
+    )
+    parser.add_argument(
+        "--encoding-energy-pj-per-query",
+        type=float,
+        default=50.0,
+        help="Modeled FeRAM logic-die encoding energy per query.",
+    )
     return parser.parse_args()
+
+
+def _estimate_feram_encoding(
+    num_queries: int,
+    query_batch_size: int,
+    cycles_per_batch: int,
+    clock_hz: float,
+    energy_pj_per_query: float,
+) -> dict:
+    """Return the modeled query-encoding cost on the FeRAM logic die."""
+    queries = max(0, int(num_queries))
+    batch_size = max(1, int(query_batch_size))
+    cycles = max(1, int(cycles_per_batch))
+    frequency = max(1.0, float(clock_hz))
+    num_batches = math.ceil(queries / batch_size) if queries else 0
+    latency_sec = num_batches * cycles / frequency
+    energy_mj = queries * max(0.0, float(energy_pj_per_query)) * 1e-9
+    return {
+        "placement": "FeRAM logic die",
+        "included_in_modeled_time": True,
+        "included_in_modeled_energy": True,
+        "query_batch_size": batch_size,
+        "num_query_batches": num_batches,
+        "cycles_per_batch": cycles,
+        "clock_hz": frequency,
+        "latency_sec": latency_sec,
+        "energy_pj_per_query": max(0.0, float(energy_pj_per_query)),
+        "energy_mj": energy_mj,
+    }
 
 
 def _load_config(config_path: Path) -> Config:
@@ -1088,7 +1145,17 @@ def run_pim_oms(args: argparse.Namespace) -> dict:
         seed=int(args.hv_seed),
         codebook=str(args.hdc_codebook),
     )
+    functional_start = time.time()
+    encoding_start = time.time()
     encoded_queries = [EncodedSpectrum(q, encoder.encode(q, homs_cfg)) for q in query_spectra]
+    host_encoding_wall_time_sec = time.time() - encoding_start
+    encoding_model = _estimate_feram_encoding(
+        num_queries=len(encoded_queries),
+        query_batch_size=args.query_batch_size,
+        cycles_per_batch=args.encoding_cycles_per_query,
+        clock_hz=args.encoding_clock_hz,
+        energy_pj_per_query=args.encoding_energy_pj_per_query,
+    )
 
     simulator_start = time.time()
 
@@ -1149,6 +1216,7 @@ def run_pim_oms(args: argparse.Namespace) -> dict:
         writer_args = SimpleNamespace(output=str(out_mztab), ref=str(ref_path), query=str(query_path))
         write_mztab(final_identifications, writer_args, homs_cfg)
 
+        search_wall_time_sec = time.time() - simulator_start
         summary = {
             "mode": "oms",
             "backend": "gpu",
@@ -1170,6 +1238,8 @@ def run_pim_oms(args: argparse.Namespace) -> dict:
             "margin_weight": float(args.margin_weight),
             "max_queries": int(args.max_queries),
             "num_query_spectra": len(encoded_queries),
+            "query_batch_size": int(encoding_model["query_batch_size"]),
+            "encoding": encoding_model,
             "counts": counts,
             "diagnostics": {
                 "standard_scores": _summarize_hit_scores(std_hits),
@@ -1177,7 +1247,10 @@ def run_pim_oms(args: argparse.Namespace) -> dict:
             },
             "standard_stage_queries_after_fdr": std_counts["final_identifications"],
             "open_stage_queries": len(open_queries),
-            "simulator_wall_time_sec": time.time() - simulator_start,
+            "host_encoding_wall_time_sec": host_encoding_wall_time_sec,
+            "search_wall_time_sec": search_wall_time_sec,
+            "simulator_wall_time_sec": search_wall_time_sec + float(encoding_model["latency_sec"]),
+            "functional_wall_time_sec": time.time() - functional_start,
             "output_mztab": str(out_mztab),
         }
 
@@ -1223,6 +1296,7 @@ def run_pim_oms(args: argparse.Namespace) -> dict:
     writer_args = SimpleNamespace(output=str(out_mztab), ref=str(ref_path), query=str(query_path))
     write_mztab(final_identifications, writer_args, homs_cfg)
 
+    search_wall_time_sec = time.time() - simulator_start
     summary = {
         "mode": "oms",
         "backend": "cpu",
@@ -1242,6 +1316,8 @@ def run_pim_oms(args: argparse.Namespace) -> dict:
         "margin_weight": float(args.margin_weight),
         "max_queries": int(args.max_queries),
         "num_query_spectra": len(encoded_queries),
+        "query_batch_size": int(encoding_model["query_batch_size"]),
+        "encoding": encoding_model,
         "counts": counts,
         "diagnostics": {
             "standard_scores": _summarize_hit_scores(std_hits),
@@ -1249,7 +1325,10 @@ def run_pim_oms(args: argparse.Namespace) -> dict:
         },
         "standard_stage_queries_after_fdr": std_counts["final_identifications"],
         "open_stage_queries": len(open_queries),
-        "simulator_wall_time_sec": time.time() - simulator_start,
+        "host_encoding_wall_time_sec": host_encoding_wall_time_sec,
+        "search_wall_time_sec": search_wall_time_sec,
+        "simulator_wall_time_sec": search_wall_time_sec + float(encoding_model["latency_sec"]),
+        "functional_wall_time_sec": time.time() - functional_start,
         "output_mztab": str(out_mztab),
     }
 
@@ -1304,10 +1383,14 @@ def main() -> int:
             fenand_decompressed_stream_gbps=args.fenand_decompressed_gbps,
             fenand_package_link_gbps=args.fenand_package_link_gbps,
             fenand_setup_overhead_us=args.fenand_filter_setup_us,
+            fenand_array_latency_us_per_spectrum=args.fenand_array_latency_us_per_spectrum,
             fenand_filter_energy_pj_per_spectrum=(
                 args.fenand_filter_energy_pj_per_spectrum
             ),
             package_link_energy_pj_per_bit=args.package_link_energy_pj_per_bit,
+            restore_latency_ns_per_activated_row=args.restore_latency_ns_per_activated_row,
+            restore_energy_fj_per_bit=args.restore_energy_fj_per_bit,
+            assumed_endurance_cycles=args.assumed_feram_endurance_cycles,
         )
         print(json.dumps({"num_spectra": n, "mode": args.mode, "result": result}, indent=2))
         return 0

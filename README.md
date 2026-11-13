@@ -40,7 +40,7 @@ pip install -r requirements.txt
 For OMS, build the included HOMSTC parser extension:
 
 ```bash
-pip install -e sumukh_proteomic_test/homs-tc
+(cd sumukh_proteomic_test/homs-tc && python setup.py build_ext --inplace)
 ```
 
 HGA is an optional GPU baseline and is not vendored here:
@@ -104,7 +104,7 @@ The reported composed latency is:
 T_total = T_genomic + T_clustering + T_OMS + T_transfer + T_MoE
 ```
 
-`latency_sec` is the modeled or parsed hardware-stage latency. `wall_time_sec`
+`latency_sec` is the stage-specific modeled or parsed latency. The legacy OMS functional backend includes host search runtime plus modeled encoding latency, not pure accelerator latency. Use the separate analytical estimator with its documented assumptions for hardware projections. `wall_time_sec`
 is the time spent running the Python/native simulator and should not be
 reported as PIM hardware latency. The package-link energy defaults to an
 explicit modeling assumption of 0.8 pJ/bit, not a measured value.
@@ -114,3 +114,45 @@ explicit modeling assumption of 0.8 pJ/bit, not a measured value.
 The included FASTA, FASTQ, and MGF files are smoke-test subsets only. Full
 Platinum Genomes NA12878, HMP2/IBDMDB, PXD024364, model checkpoints, generated
 indexes, binaries, and experiment outputs are excluded by `.gitignore`.
+
+## Source release (November 2026)
+
+The release synchronizes the core pipeline with the project working tree:
+FeRAM read/restore accounting, batched encoding cost, FeNAND operating-point
+parameters, clustering stopping/tie behavior, and deterministic coarse-filter
+tests. See [FENAND_HSU_MODEL.md](FENAND_HSU_MODEL.md) for the calibration scope.
+Full experiments were not rerun to prepare this source release.
+
+Useful entry points:
+- estimate_pim_model_latency.py: analytical OMS latency and energy.
+- recalculate_ee_with_feram_restore.py: explicit restore/energy formula.
+- proteomic_full_pipeline/fenand_coarse_filter.py: upper-bound filtering and exact Top-K.
+- proteomic_full_pipeline/run_oms_filter_sweep.py: standard-stage sensitivity.
+- proteomic_full_pipeline/audit_oms_open_stage.py: actual retry-query replay.
+- proteomic_full_pipeline/run_oms_open_filter_sweep.py: uncapped open-stage sensitivity.
+
+The full sensitivity runs require user-supplied query/reference spectra, CUDA
+and CuPy, and the matching 2048-bit Hyper-Spec codebook. Set the environment
+variable MULTIRAM_HYPERSPEC_CODEBOOK to the existing
+lv_id_hvs_D_2048_Q_16_bin_27981_flip_2.0.npz file. It is not bundled and must
+not be replaced with a newly generated random codebook when reproducing the
+original experiment. Run each script with --help; --query and --ref are
+required for these analysis tools. Plotting uses optional matplotlib.
+
+This is a source release, not a complete frozen paper artifact.
+Manuscript drafts, review comments, exploratory audit snapshots, generated
+figures/tables, full omics datasets, checkpoints, compiled libraries, private
+machine configuration, and third-party thermal-solver binaries are excluded
+from this update. Existing tracked content is preserved. Historical source
+subdirectories may still contain environment-specific experiment paths;
+the main driver exposes data and interpreter paths as command-line options.
+
+## Regression tests
+
+Install requirements-dev.txt, then run:
+
+    python -m pytest proteomic_full_pipeline/test_fenand_coarse_filter.py tests -q
+
+Python 3.10 is the reference environment for the legacy HOMSTC parser; its
+requirements file records the original versions. CUDA baselines and full
+dataset-dependent experiments require their additional dependencies and data.

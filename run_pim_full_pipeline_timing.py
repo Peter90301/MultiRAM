@@ -123,13 +123,27 @@ def parse_args() -> argparse.Namespace:
         help="Optional OMS candidate cap passed to pim_hyperoms_estimator.py; 0 means no cap.",
     )
     parser.add_argument("--progress-interval", type=int, default=2000)
+    parser.add_argument("--oms-query-batch-size", type=int, default=32)
+    parser.add_argument("--oms-encoding-cycles-per-query", type=int, default=100)
+    parser.add_argument("--oms-encoding-clock-hz", type=float, default=500e6)
+    parser.add_argument("--oms-encoding-energy-pj-per-query", type=float, default=50.0)
+    parser.add_argument("--restore-latency-ns-per-activated-row", type=float, default=50.0)
+    parser.add_argument("--restore-energy-fj-per-bit", type=float, default=39.7)
+    parser.add_argument("--assumed-feram-endurance-cycles", type=float, default=1e12)
+    parser.add_argument(
+        "--restore-schedule",
+        choices=["pipelined", "serialized"],
+        default="pipelined",
+        help="Overlap restore for independent row groups, or retain serialized timing.",
+    )
     parser.add_argument("--cluster-bucket-width-da", type=float, default=5.0)
     parser.add_argument("--disable-fenand-coarse-filter", action="store_true")
     parser.add_argument("--fenand-metadata-bytes-per-spectrum", type=float, default=16.0)
     parser.add_argument("--fenand-output-bytes-per-spectrum", type=float, default=256.0)
-    parser.add_argument("--fenand-filter-setup-us", type=float, default=50.0)
+    parser.add_argument("--fenand-filter-setup-us", type=float, default=0.0)
+    parser.add_argument("--fenand-array-latency-us-per-spectrum", type=float, default=0.429e6 / 46665.0)
     parser.add_argument(
-        "--fenand-filter-energy-pj-per-spectrum", type=float, default=20.0
+        "--fenand-filter-energy-pj-per-spectrum", type=float, default=0.491e12 / 46665.0
     )
 
     parser.add_argument("--skip-moe", action="store_true")
@@ -475,10 +489,20 @@ def run_proteomic_clustering(args: argparse.Namespace, out_dir: Path) -> StageTi
         str(args.feram_external_gbps),
         "--fenand-filter-setup-us",
         str(args.fenand_filter_setup_us),
+        "--fenand-array-latency-us-per-spectrum",
+        str(args.fenand_array_latency_us_per_spectrum),
         "--fenand-filter-energy-pj-per-spectrum",
         str(args.fenand_filter_energy_pj_per_spectrum),
         "--package-link-energy-pj-per-bit",
         str(args.package_link_energy_pj_per_bit),
+        "--restore-latency-ns-per-activated-row",
+        str(args.restore_latency_ns_per_activated_row),
+        "--restore-energy-fj-per-bit",
+        str(args.restore_energy_fj_per_bit),
+        "--assumed-feram-endurance-cycles",
+        str(args.assumed_feram_endurance_cycles),
+        "--restore-schedule",
+        str(args.restore_schedule),
     ]
     if args.disable_fenand_coarse_filter:
         cmd.append("--disable-fenand-coarse-filter")
@@ -501,6 +525,8 @@ def run_proteomic_clustering(args: argparse.Namespace, out_dir: Path) -> StageTi
             f"pair_reduction_percent={result.get('candidate_pair_reduction_percent')}; "
             f"fenand_filter_s={result.get('fenand_filter_total_s')}; "
             f"feram_core_s={result.get('feram_cluster_core_s')}; "
+            f"restore_s={result.get('feram_restore_time_s')}; "
+            f"restore_energy_mj={result.get('feram_restore_energy_mj')}; "
             f"energy_mj={result.get('multiram_cluster_total_energy_mj')}"
         )
     return StageTiming(
@@ -542,6 +568,14 @@ def run_proteomic_oms(args: argparse.Namespace, out_dir: Path) -> StageTiming:
         str(args.gpu_chunk_size),
         "--progress-interval",
         str(args.progress_interval),
+        "--query-batch-size",
+        str(args.oms_query_batch_size),
+        "--encoding-cycles-per-query",
+        str(args.oms_encoding_cycles_per_query),
+        "--encoding-clock-hz",
+        str(args.oms_encoding_clock_hz),
+        "--encoding-energy-pj-per-query",
+        str(args.oms_encoding_energy_pj_per_query),
         "--output",
         str(proteomic_out),
     ]
@@ -557,9 +591,14 @@ def run_proteomic_oms(args: argparse.Namespace, out_dir: Path) -> StageTiming:
     if summary_path.exists():
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
         latency = float(summary["simulator_wall_time_sec"])
+        encoding = summary.get("encoding", {})
         notes = (
             f"num_query_spectra={summary.get('num_query_spectra')}; "
-            f"backend={summary.get('backend')}; counts={summary.get('counts')}"
+            f"backend={summary.get('backend')}; counts={summary.get('counts')}; "
+            f"encoding_placement={encoding.get('placement')}; "
+            f"query_batch_size={encoding.get('query_batch_size')}; "
+            f"encoding_latency_sec={encoding.get('latency_sec')}; "
+            f"encoding_energy_mj={encoding.get('energy_mj')}"
         )
     return StageTiming(
         stage=f"proteomic_oms_{args.proteomic_oms_backend}",
