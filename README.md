@@ -5,6 +5,8 @@ end-to-end latency, data movement, and transfer energy across genomics,
 proteomics, and MoE stages. Hardware numbers produced by these scripts are
 model outputs unless a result is explicitly labeled as measured.
 
+See [FILE_GUIDE.md](FILE_GUIDE.md) for a concise Traditional Chinese file-by-file guide.
+
 ## Components
 
 | Component | Directory | Role |
